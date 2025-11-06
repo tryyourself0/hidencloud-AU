@@ -6,6 +6,9 @@ on:
   schedule:
     - cron: '33 16 * * 3'
 
+permissions:
+  contents: write # 授予工作流写入仓库内容的权限
+
 jobs:
   renew-job:
     runs-on: ubuntu-latest

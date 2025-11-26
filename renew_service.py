@@ -20,11 +20,46 @@ def log(message):
     """打印带时间戳的日志"""
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {message}", flush=True)
 
+def handle_cloudflare(page):
+    """
+    通用 Cloudflare 人机验证处理函数。
+    检测页面是否存在 Cloudflare 挑战，如果存在则尝试点击。
+    """
+    try:
+        # 检查是否存在 Cloudflare Turnstile iframe
+        # 使用 count() 快速检查，避免长时间等待
+        if page.locator('iframe[src*="challenges.cloudflare.com"]').count() > 0:
+            log("⚠️ 检测到 Cloudflare 安全验证页面，尝试自动处理...")
+            
+            turnstile_frame = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
+            checkbox = turnstile_frame.locator('input[type="checkbox"]')
+            
+            # 确保复选框可见再点击
+            if checkbox.is_visible(timeout=5000):
+                log("正在点击人机验证复选框...")
+                checkbox.click()
+                
+                # 等待验证通过的标志 (input value 出现 或 iframe 消失)
+                try:
+                    page.wait_for_function(
+                        "() => !document.querySelector('iframe[src*=\"challenges.cloudflare.com\"]') || (document.querySelector('[name=\"cf-turnstile-response\"]') && document.querySelector('[name=\"cf-turnstile-response\"]').value)",
+                        timeout=15000
+                    )
+                    log("✅ Cloudflare 验证点击完成，等待跳转...")
+                    time.sleep(2) # 给予额外缓冲时间让页面刷新
+                    return True
+                except:
+                    log("⚠️ 点击了验证框，但页面状态未在预期时间内改变，继续后续流程...")
+            else:
+                log("发现了验证框架但找不到复选框，可能正在加载...")
+    except Exception as e:
+        # 仅仅是检测，不要让报错中断主流程
+        pass
+    return False
+
 def login(page):
     """
     处理登录逻辑。
-    1. 优先尝试使用 Cookie 登录。
-    2. 如果 Cookie 失效或不存在，则使用账号密码进行登录。
     """
     log("开始登录流程...")
 
@@ -40,6 +75,9 @@ def login(page):
             }])
             log("Cookie 已设置。正在访问服务管理页面...")
             page.goto(SERVICE_URL, wait_until="networkidle", timeout=60000)
+
+            # 检查是否遇到验证
+            handle_cloudflare(page)
 
             if "auth/login" in page.url:
                 log("Cookie 登录失败或会话已过期，将回退到账号密码登录。")
@@ -62,25 +100,17 @@ def login(page):
     log("正在尝试使用邮箱和密码登录...")
     try:
         page.goto(LOGIN_URL, wait_until="networkidle", timeout=60000)
+        
+        # 填写前先处理可能出现的验证
+        handle_cloudflare(page)
+        
         log("登录页面已加载。")
-
         page.fill('input[name="email"]', HIDENCLOUD_EMAIL)
         page.fill('input[name="password"]', HIDENCLOUD_PASSWORD)
         log("邮箱和密码已填写。")
 
-        log("正在处理 Cloudflare Turnstile 人机验证...")
-        turnstile_frame = page.frame_locator('iframe[src*="challenges.cloudflare.com"]')
-        checkbox = turnstile_frame.locator('input[type="checkbox"]')
-        
-        checkbox.wait_for(state="visible", timeout=30000)
-        checkbox.click()
-        log("已点击人机验证复选框，等待验证结果...")
-        
-        page.wait_for_function(
-            "() => document.querySelector('[name=\"cf-turnstile-response\"]') && document.querySelector('[name=\"cf-turnstile-response\"]').value",
-            timeout=60000
-        )
-        log("✅ 人机验证成功！")
+        # 调用通用验证处理
+        handle_cloudflare(page)
 
         page.click('button[type="submit"]:has-text("Sign in to your account")')
         log("已点击登录按钮，等待页面跳转...")
@@ -111,6 +141,9 @@ def renew_service(page):
             log(f"当前不在目标页面，正在导航至: {SERVICE_URL}")
             page.goto(SERVICE_URL, wait_until="networkidle", timeout=60000)
         
+        # 页面加载后立即检查验证
+        handle_cloudflare(page)
+        
         log("服务管理页面已加载。")
 
         log("步骤 1: 正在查找并点击 'Renew' 按钮...")
@@ -119,90 +152,88 @@ def renew_service(page):
         renew_button.click()
         log("✅ 'Renew' 按钮已点击。")
         
-        # --- 等待 0.9 秒 ---
         log("等待 0.9 秒...")
         time.sleep(0.9)
 
-# +++ 最终版代码：直接捕获重定向后的URL +++
         log("步骤 2: 准备监听网络请求并点击 'Create Invoice' 按钮...")
         
-        # 准备一个变量来存储我们捕获到的新URL
         new_invoice_url = None
 
-        # 定义一个响应处理器函数
         def handle_response(response):
             nonlocal new_invoice_url
-            # 直接检查响应的最终URL是否是发票页面的URL
             if "/payment/invoice/" in response.url:
                 new_invoice_url = response.url
-                log(f"🎉 成功捕获到重定向的发票URL: {new_invoice_url}")
+                log(f"🎉 成功从网络请求中捕获到发票URL: {new_invoice_url}")
 
-        # 在点击之前，启动网络响应监听
         page.on("response", handle_response)
         
-        # 查找并点击按钮
         create_invoice_button = page.locator('button:has-text("Create Invoice")')
         create_invoice_button.wait_for(state="visible", timeout=30000)
         create_invoice_button.click()
-        log("✅ 'Create Invoice' 按钮已点击，正在等待网络响应...")
+        log("✅ 'Create Invoice' 按钮已点击，正在等待响应或跳转...")
 
-        # 使用一个更智能的循环来等待URL被捕获
-        timeout = 15  # seconds
+        # --- 智能等待循环 (包含 Cloudflare 处理) ---
+        # 增加超时时间以应对验证耗时
+        timeout = 25 
         for i in range(timeout):
+            # 1. 如果监听器捕获到了 URL
             if new_invoice_url:
                 break
+            
+            # 2. 如果页面已经直接跳转到了发票页面 (Cloudflare 通过后可能发生)
+            if "/payment/invoice/" in page.url:
+                new_invoice_url = page.url
+                log(f"🎉 页面已跳转至发票页面: {new_invoice_url}")
+                break
+
+            # 3. 检查并处理 Cloudflare 验证
+            # 如果这里处理了验证，下一次循环可能会检测到 URL 变化
+            handle_cloudflare(page)
+            
             page.wait_for_timeout(1000)
         
-        # 停止监听，避免影响后续操作
         page.remove_listener("response", handle_response)
         
-        # 检查是否成功获取到URL
         if new_invoice_url:
-            log(f"正在手动跳转到新发票页面: {new_invoice_url}")
-            # 如果当前URL已经是目标URL，则无需跳转
+            log(f"前往发票页面: {new_invoice_url}")
             if page.url != new_invoice_url:
                  page.goto(new_invoice_url, wait_until="networkidle", timeout=60000)
-            else:
-                 log("浏览器已自动跳转到正确页面，无需手动跳转。")
         else:
-            log("❌ 错误：未能从网络响应中捕获到新发票的URL。")
-            raise Exception("Failed to capture new invoice URL from network response.")
+            log("❌ 错误：超时未获取到发票 URL。截图保存中...")
+            page.screenshot(path="renew_failed_cloudflare.png")
+            raise Exception("Failed to capture new invoice URL (possibly blocked by Cloudflare).")
 
-# +++ 修改后的代码 +++
         log("步骤 3: 正在查找可见的 'Pay' 按钮...")
-        # 在选择器中直接加入 :visible 过滤器，确保只匹配当前可见的按钮
         pay_button = page.locator('a:has-text("Pay"):visible, button:has-text("Pay"):visible').first
-        # 因为定位器已经确保是可见的，可以直接进行点击，但为了保险起见，可以保留一个短暂的等待
-        pay_button.wait_for(state="visible", timeout=10000) # 等待时间可以缩短
+        pay_button.wait_for(state="visible", timeout=15000)
         
         log("✅ 'Pay' 按钮已找到，正在点击...")
         pay_button.click()
         log("✅ 'Pay' 按钮已点击。")
         
         time.sleep(5)
-        log("续费流程似乎已成功触发。请登录网站确认续费状态。")
+        log("续费流程似乎已成功触发。")
         page.screenshot(path="renew_success.png")
         return True
     except PlaywrightTimeoutError as e:
-        log(f"❌ 续费任务超时: 未在规定时间内找到元素。请检查选择器或页面是否已更改。错误: {e}")
+        log(f"❌ 续费任务超时: {e}")
         page.screenshot(path="renew_timeout_error.png")
         return False
     except Exception as e:
-        log(f"❌ 续费任务执行过程中发生未知错误: {e}")
+        log(f"❌ 续费任务执行错误: {e}")
         page.screenshot(path="renew_general_error.png")
         return False
 
 def main():
-    """主函数，编排整个自动化流程"""
+    """主函数"""
     if not HIDENCLOUD_COOKIE and not (HIDENCLOUD_EMAIL and HIDENCLOUD_PASSWORD):
-        log("❌ 致命错误: 必须提供 HIDENCLOUD_COOKIE 或 (HIDENCLOUD_EMAIL 和 HIDENCLOUD_PASSWORD) 环境变量。")
+        log("❌ 致命错误: 必须提供环境变量。")
         sys.exit(1)
 
     with sync_playwright() as p:
         browser = None
         try:
             log("启动浏览器...")
-            # 添加启动参数以规避检测
             browser = p.chromium.launch(
                 headless=True,
                 args=['--disable-blink-features=AutomationControlled']

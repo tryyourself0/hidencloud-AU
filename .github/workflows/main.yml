@@ -23,13 +23,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 安装 XVFB (虚拟显示器)
       - name: Install System Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y xvfb
 
-      # 只安装基础库
       - name: Install Playwright and dependencies
         run: |
           pip install playwright
@@ -40,7 +38,7 @@ jobs:
           HIDENCLOUD_COOKIE: ${{ secrets.HIDENCLOUD_COOKIE }}
           HIDENCLOUD_EMAIL: ${{ secrets.HIDENCLOUD_EMAIL }}
           HIDENCLOUD_PASSWORD: ${{ secrets.HIDENCLOUD_PASSWORD }}
-        # 使用 xvfb-run 模拟真实显示器 (1920x1080)
+        # 必须使用 xvfb-run
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python -u renew_service.py
 
       - name: Upload error artifacts
